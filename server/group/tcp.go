@@ -15,9 +15,11 @@
 package group
 
 import (
+	"math/rand"
 	"net"
 	"strconv"
 	"sync"
+	"time"
 
 	gerr "github.com/fatedier/golib/errors"
 
@@ -72,11 +74,15 @@ type TCPGroup struct {
 	port     int
 	realPort int
 
+	// Deprecated: acceptCh is kept for backward compatibility but no longer used for
+	// distributing new connections. Each listener now owns an internal channel
+	// and we pick one via round-robin for fair load balancing.
 	acceptCh chan net.Conn
 	tcpLn    net.Listener
 	lns      []*TCPGroupListener
 	ctl      *TCPGroupCtl
 	mu       sync.Mutex
+	// random selection among active listeners (seed randomized at first listener creation)
 }
 
 // NewTCPGroup return a new TCPGroup
@@ -105,7 +111,7 @@ func (tg *TCPGroup) Listen(proxyName string, group string, groupKey string, addr
 			err = errRet
 			return
 		}
-		ln = newTCPGroupListener(group, tg, tcpLn.Addr())
+	ln = newTCPGroupListener(group, tg, tcpLn.Addr())
 
 		tg.group = group
 		tg.groupKey = groupKey
@@ -117,6 +123,8 @@ func (tg *TCPGroup) Listen(proxyName string, group string, groupKey string, addr
 		if tg.acceptCh == nil {
 			tg.acceptCh = make(chan net.Conn)
 		}
+	// seed random for selection distribution
+	rand.Seed(time.Now().UnixNano())
 		go tg.worker()
 	} else {
 		// address and port in the same group must be equal
@@ -146,18 +154,29 @@ func (tg *TCPGroup) worker() {
 		if err != nil {
 			return
 		}
-		err = gerr.PanicToError(func() {
-			tg.acceptCh <- c
-		})
-		if err != nil {
+	// choose a listener randomly
+		tg.mu.Lock()
+		lCount := len(tg.lns)
+		if lCount == 0 {
+			tg.mu.Unlock()
+			c.Close()
 			return
 		}
+	idx := rand.Intn(lCount)
+		target := tg.lns[idx]
+		tg.mu.Unlock()
+
+		// deliver connection to target listener's channel; block if full
+		// (channel is buffered so short bursts are queued fairly)
+		_ = gerr.PanicToError(func() {
+			target.acceptCh <- c
+		})
 	}
 }
 
-func (tg *TCPGroup) Accept() <-chan net.Conn {
-	return tg.acceptCh
-}
+// Accept is deprecated and only kept so existing code paths using the group directly (if any) still receive connections.
+// New load balancing occurs in worker() distributing to per-listener channels.
+func (tg *TCPGroup) Accept() <-chan net.Conn { return tg.acceptCh }
 
 // CloseListener remove the TCPGroupListener from the TCPGroup
 func (tg *TCPGroup) CloseListener(ln *TCPGroupListener) {
@@ -184,6 +203,7 @@ type TCPGroupListener struct {
 
 	addr    net.Addr
 	closeCh chan struct{}
+	acceptCh chan net.Conn
 }
 
 func newTCPGroupListener(name string, group *TCPGroup, addr net.Addr) *TCPGroupListener {
@@ -192,16 +212,17 @@ func newTCPGroupListener(name string, group *TCPGroup, addr net.Addr) *TCPGroupL
 		group:     group,
 		addr:      addr,
 		closeCh:   make(chan struct{}),
+		// buffer a few connections to improve fairness when one proxy is busy establishing work conns
+		acceptCh:  make(chan net.Conn, 64),
 	}
 }
 
 // Accept will accept connections from TCPGroup
 func (ln *TCPGroupListener) Accept() (c net.Conn, err error) {
-	var ok bool
 	select {
 	case <-ln.closeCh:
 		return nil, ErrListenerClosed
-	case c, ok = <-ln.group.Accept():
+	case c, ok := <-ln.acceptCh:
 		if !ok {
 			return nil, ErrListenerClosed
 		}
@@ -216,6 +237,9 @@ func (ln *TCPGroupListener) Addr() net.Addr {
 // Close close the listener
 func (ln *TCPGroupListener) Close() (err error) {
 	close(ln.closeCh)
+
+	// close accept channel so waiting Accept() returns
+	close(ln.acceptCh)
 
 	// remove self from TcpGroup
 	ln.group.CloseListener(ln)

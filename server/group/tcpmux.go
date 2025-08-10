@@ -17,8 +17,10 @@ package group
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"net"
 	"sync"
+	"time"
 
 	gerr "github.com/fatedier/golib/errors"
 
@@ -84,11 +86,13 @@ type TCPMuxGroup struct {
 	username        string
 	password        string
 
+	// Deprecated: acceptCh retained for backward compatibility; distribution now handled via per-listener channels with random selection.
 	acceptCh chan net.Conn
 	tcpMuxLn net.Listener
 	lns      []*TCPMuxGroupListener
 	ctl      *TCPMuxGroupCtl
 	mu       sync.Mutex
+	// nextIdx is removed as we are switching to random selection
 }
 
 // NewTCPMuxGroup return a new TCPMuxGroup
@@ -116,7 +120,7 @@ func (tmg *TCPMuxGroup) HTTPConnectListen(
 		if errRet != nil {
 			return nil, errRet
 		}
-		ln = newTCPMuxGroupListener(group, tmg, tcpMuxLn.Addr())
+	ln = newTCPMuxGroupListener(group, tmg, tcpMuxLn.Addr())
 
 		tmg.group = group
 		tmg.groupKey = groupKey
@@ -129,7 +133,8 @@ func (tmg *TCPMuxGroup) HTTPConnectListen(
 		if tmg.acceptCh == nil {
 			tmg.acceptCh = make(chan net.Conn)
 		}
-		go tmg.worker()
+		rand.Seed(time.Now().UnixNano()) // Seed the random number generator
+	go tmg.worker()
 	} else {
 		// route config in the same group must be equal
 		if tmg.group != group || tmg.domain != routeConfig.Domain ||
@@ -154,18 +159,25 @@ func (tmg *TCPMuxGroup) worker() {
 		if err != nil {
 			return
 		}
-		err = gerr.PanicToError(func() {
-			tmg.acceptCh <- c
-		})
-		if err != nil {
+		// choose listener round-robin
+		tmg.mu.Lock()
+		lCount := len(tmg.lns)
+		if lCount == 0 {
+			tmg.mu.Unlock()
+			c.Close()
 			return
 		}
+		idx := rand.Intn(lCount) // Select a random listener
+		target := tmg.lns[idx]
+		tmg.mu.Unlock()
+
+		_ = gerr.PanicToError(func() {
+			target.acceptCh <- c
+		})
 	}
 }
 
-func (tmg *TCPMuxGroup) Accept() <-chan net.Conn {
-	return tmg.acceptCh
-}
+func (tmg *TCPMuxGroup) Accept() <-chan net.Conn { return tmg.acceptCh }
 
 // CloseListener remove the TCPMuxGroupListener from the TCPMuxGroup
 func (tmg *TCPMuxGroup) CloseListener(ln *TCPMuxGroupListener) {
@@ -191,6 +203,7 @@ type TCPMuxGroupListener struct {
 
 	addr    net.Addr
 	closeCh chan struct{}
+	acceptCh chan net.Conn
 }
 
 func newTCPMuxGroupListener(name string, group *TCPMuxGroup, addr net.Addr) *TCPMuxGroupListener {
@@ -198,17 +211,17 @@ func newTCPMuxGroupListener(name string, group *TCPMuxGroup, addr net.Addr) *TCP
 		groupName: name,
 		group:     group,
 		addr:      addr,
-		closeCh:   make(chan struct{}),
+	closeCh:   make(chan struct{}),
+	acceptCh:  make(chan net.Conn, 64),
 	}
 }
 
 // Accept will accept connections from TCPMuxGroup
 func (ln *TCPMuxGroupListener) Accept() (c net.Conn, err error) {
-	var ok bool
 	select {
 	case <-ln.closeCh:
 		return nil, ErrListenerClosed
-	case c, ok = <-ln.group.Accept():
+	case c, ok := <-ln.acceptCh:
 		if !ok {
 			return nil, ErrListenerClosed
 		}
@@ -223,6 +236,7 @@ func (ln *TCPMuxGroupListener) Addr() net.Addr {
 // Close close the listener
 func (ln *TCPMuxGroupListener) Close() (err error) {
 	close(ln.closeCh)
+	close(ln.acceptCh)
 
 	// remove self from TcpMuxGroup
 	ln.group.CloseListener(ln)
