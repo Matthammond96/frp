@@ -25,6 +25,7 @@ import (
 
 	"github.com/fatedier/frp/pkg/config/types"
 	v1 "github.com/fatedier/frp/pkg/config/v1"
+	"github.com/fatedier/frp/pkg/events"
 	"github.com/fatedier/frp/pkg/metrics/mem"
 	httppkg "github.com/fatedier/frp/pkg/util/http"
 	"github.com/fatedier/frp/pkg/util/log"
@@ -48,7 +49,7 @@ func (svr *Service) registerRouteHandlers(helper *httppkg.RouterRegisterHelper) 
 		subRouter.Handle("/metrics", promhttp.Handler())
 	}
 
-	// apis
+	// apis (dashboard) - intentionally excludes /api/conn/events (only exposed on secondary proxy API server)
 	subRouter.HandleFunc("/api/serverinfo", svr.apiServerInfo).Methods("GET")
 	subRouter.HandleFunc("/api/proxy/{type}", svr.apiProxyByType).Methods("GET")
 	subRouter.HandleFunc("/api/proxy/{type}/{name}", svr.apiProxyByTypeAndName).Methods("GET")
@@ -64,6 +65,43 @@ func (svr *Service) registerRouteHandlers(helper *httppkg.RouterRegisterHelper) 
 	subRouter.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/static/", http.StatusMovedPermanently)
 	})
+}
+
+// registerLimitedProxyAPIHandlers registers a minimal set of endpoints for the
+	
+// secondary proxy API server. It only exposes:
+//   GET /api/proxy/http
+// and optional /healthz for basic liveness.
+func (svr *Service) registerLimitedProxyAPIHandlers(helper *httppkg.RouterRegisterHelper) {
+	// health
+	helper.Router.HandleFunc("/healthz", svr.healthz)
+
+	subRouter := helper.Router.NewRoute().Subrouter()
+	subRouter.Use(helper.AuthMiddleware.Middleware)
+
+	// expose connection events SSE stream only on this limited API server
+	subRouter.HandleFunc("/api/conn/events", events.ServeSSE).Methods("GET")
+
+	// only allow querying http proxies
+	subRouter.HandleFunc("/api/proxy/http", func(w http.ResponseWriter, r *http.Request) {
+		// leverage existing handler logic by injecting type param
+		// create a shallow copy request with mux vars
+		// simpler: directly call underlying logic replicating apiProxyByType with fixed type
+		res := GeneralResponse{Code: 200}
+		defer func() {
+			log.Infof("http response [%s]: code [%d]", r.URL.Path, res.Code)
+			w.WriteHeader(res.Code)
+			if len(res.Msg) > 0 {
+				_, _ = w.Write([]byte(res.Msg))
+			}
+		}()
+		log.Infof("http request: [%s]", r.URL.Path)
+		proxyInfoResp := GetProxyInfoResp{}
+		proxyInfoResp.Proxies = svr.getProxyStatsByType(string(v1.ProxyTypeHTTP))
+		slices.SortFunc(proxyInfoResp.Proxies, func(a, b *ProxyStatsInfo) int { return cmp.Compare(a.Name, b.Name) })
+		buf, _ := json.Marshal(&proxyInfoResp)
+		res.Msg = string(buf)
+	}).Methods("GET")
 }
 
 type serverInfoResp struct {

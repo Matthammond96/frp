@@ -73,6 +73,9 @@ type ServerConfig struct {
 	SSHTunnelGateway SSHTunnelGateway `json:"sshTunnelGateway,omitempty"`
 
 	WebServer WebServerConfig `json:"webServer,omitempty"`
+	// ProxyAPIServer is an optional secondary API server that can expose a limited
+	// set of endpoints (currently only /api/proxy/http) on a different port.
+	ProxyAPIServer WebServerConfig `json:"proxyAPIServer,omitempty"`
 	// EnablePrometheus will export prometheus metrics on webserver address
 	// in /metrics api.
 	EnablePrometheus bool `json:"enablePrometheus,omitempty"`
@@ -108,6 +111,7 @@ func (c *ServerConfig) Complete() error {
 	c.Log.Complete()
 	c.Transport.Complete()
 	c.WebServer.Complete()
+	c.ProxyAPIServer.Complete()
 	c.SSHTunnelGateway.Complete()
 
 	c.BindAddr = util.EmptyOr(c.BindAddr, "0.0.0.0")

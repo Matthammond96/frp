@@ -78,6 +78,8 @@ type WebServerConfig struct {
 	PprofEnable bool `json:"pprofEnable,omitempty"`
 	// Enable TLS if TLSConfig is not nil.
 	TLS *TLSConfig `json:"tls,omitempty"`
+	// APIKey enables header-based auth (X-API-Key) when set (used for proxyAPIServer optional hardening)
+	APIKey string `json:"apiKey,omitempty"`
 }
 
 func (c *WebServerConfig) Complete() {

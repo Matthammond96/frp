@@ -23,6 +23,7 @@ import (
 	libio "github.com/fatedier/golib/io"
 
 	v1 "github.com/fatedier/frp/pkg/config/v1"
+	"github.com/fatedier/frp/pkg/events"
 	"github.com/fatedier/frp/pkg/util/limit"
 	netpkg "github.com/fatedier/frp/pkg/util/net"
 	"github.com/fatedier/frp/pkg/util/util"
@@ -146,6 +147,12 @@ func (pxy *HTTPProxy) Run() (remoteAddr string, err error) {
 		}
 	}
 	remoteAddr = strings.Join(addrs, ",")
+	// Emit a registration event so SSE consumers know a new HTTP proxy is available
+	events.PublishConnEvent("register", pxy.GetName(), pxy.GetConfigurer().GetBaseConfig().Type, events.PublishOptions{
+		Domains:    addrs, // canonical addresses (domain:port)
+		RemoteAddr: remoteAddr,
+		Group:      pxy.cfg.LoadBalancer.Group,
+	})
 	return
 }
 
@@ -184,6 +191,9 @@ func (pxy *HTTPProxy) GetRealConn(remoteAddr string) (workConn net.Conn, err err
 	workConn = netpkg.WrapReadWriteCloserToConn(rwc, tmpConn)
 	workConn = netpkg.WrapStatsConn(workConn, pxy.updateStatsAfterClosedConn)
 	metrics.Server.OpenConnection(pxy.GetName(), pxy.GetConfigurer().GetBaseConfig().Type)
+	events.PublishConnEvent("open", pxy.GetName(), pxy.GetConfigurer().GetBaseConfig().Type, events.PublishOptions{
+		Group: pxy.cfg.LoadBalancer.Group,
+	})
 	return
 }
 
@@ -191,11 +201,16 @@ func (pxy *HTTPProxy) updateStatsAfterClosedConn(totalRead, totalWrite int64) {
 	name := pxy.GetName()
 	proxyType := pxy.GetConfigurer().GetBaseConfig().Type
 	metrics.Server.CloseConnection(name, proxyType)
+	events.PublishConnEvent("close", name, proxyType, events.PublishOptions{Group: pxy.cfg.LoadBalancer.Group})
 	metrics.Server.AddTrafficIn(name, proxyType, totalWrite)
 	metrics.Server.AddTrafficOut(name, proxyType, totalRead)
 }
 
 func (pxy *HTTPProxy) Close() {
+	// Emit an unregistration event before cleanup
+	events.PublishConnEvent("unregister", pxy.GetName(), pxy.GetConfigurer().GetBaseConfig().Type, events.PublishOptions{
+		Group: pxy.cfg.LoadBalancer.Group,
+	})
 	pxy.BaseProxy.Close()
 	for _, closeFn := range pxy.closeFuncs {
 		closeFn()

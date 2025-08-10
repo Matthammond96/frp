@@ -112,6 +112,9 @@ type Service struct {
 	// web server for dashboard UI and apis
 	webServer *httppkg.Server
 
+	// secondary limited proxy api server (only /api/proxy/http)
+	proxyAPIServer *httppkg.Server
+
 	sshTunnelGateway *ssh.Gateway
 
 	// Verifies authentication based on selected method
@@ -137,12 +140,21 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 	}
 
 	var webServer *httppkg.Server
+	var proxyAPIServer *httppkg.Server
 	if cfg.WebServer.Port > 0 {
 		ws, err := httppkg.NewServer(cfg.WebServer)
 		if err != nil {
 			return nil, err
 		}
 		webServer = ws
+	// create limited proxy api server if configured
+	if cfg.ProxyAPIServer.Port > 0 {
+		ps, err := httppkg.NewServer(cfg.ProxyAPIServer)
+		if err != nil {
+			return nil, err
+		}
+		proxyAPIServer = ps
+	}
 
 		modelmetrics.EnableMem()
 		if cfg.EnablePrometheus {
@@ -161,14 +173,18 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 		},
 		sshTunnelListener: netpkg.NewInternalListener(),
 		httpVhostRouter:   vhost.NewRouters(),
-		authVerifier:      auth.NewAuthVerifier(cfg.Auth),
-		webServer:         webServer,
+		authVerifier:    auth.NewAuthVerifier(cfg.Auth),
+		webServer:       webServer,
+		proxyAPIServer: proxyAPIServer,
 		tlsConfig:         tlsConfig,
 		cfg:               cfg,
 		ctx:               context.Background(),
 	}
 	if webServer != nil {
 		webServer.RouteRegister(svr.registerRouteHandlers)
+	}
+	if proxyAPIServer != nil {
+		proxyAPIServer.RouteRegister(svr.registerLimitedProxyAPIHandlers)
 	}
 
 	// Create tcpmux httpconnect multiplexer.
@@ -355,6 +371,16 @@ func (svr *Service) Run(ctx context.Context) {
 		}()
 	}
 
+	// run limited proxy api server
+	if svr.proxyAPIServer != nil {
+		go func() {
+			log.Infof("proxy api server listen on %s", svr.proxyAPIServer.Address())
+			if err := svr.proxyAPIServer.Run(); err != nil {
+				log.Warnf("proxy api server exit with error: %v", err)
+			}
+		}()
+	}
+
 	go svr.HandleListener(svr.sshTunnelListener, true)
 
 	if svr.kcpListener != nil {
@@ -404,6 +430,9 @@ func (svr *Service) Close() error {
 	}
 	if svr.webServer != nil {
 		svr.webServer.Close()
+	}
+	if svr.proxyAPIServer != nil {
+		svr.proxyAPIServer.Close()
 	}
 	if svr.sshTunnelGateway != nil {
 		svr.sshTunnelGateway.Close()

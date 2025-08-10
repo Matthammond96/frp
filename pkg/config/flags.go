@@ -255,4 +255,9 @@ func RegisterServerConfigFlags(cmd *cobra.Command, c *v1.ServerConfig, opts ...R
 	cmd.PersistentFlags().VarP(&BoolFuncFlag{
 		TrueFunc: func() { c.WebServer.TLS = &webServerTLS },
 	}, "dashboard_tls_mode", "", "if enable dashboard tls mode")
+
+	// Secondary limited proxy API server (only /api/proxy/http)
+	cmd.PersistentFlags().StringVarP(&c.ProxyAPIServer.Addr, "proxy_api_addr", "", "0.0.0.0", "proxy api server bind address")
+	cmd.PersistentFlags().IntVarP(&c.ProxyAPIServer.Port, "proxy_api_port", "", 0, "proxy api server port (only exposes /api/proxy/http)")
+	cmd.PersistentFlags().StringVarP(&c.ProxyAPIServer.APIKey, "proxy_api_key", "", "", "proxy api server required X-API-Key header (overrides basic auth if set)")
 }

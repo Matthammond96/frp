@@ -29,6 +29,7 @@ import (
 
 	"github.com/fatedier/frp/pkg/config/types"
 	v1 "github.com/fatedier/frp/pkg/config/v1"
+	"github.com/fatedier/frp/pkg/events"
 	"github.com/fatedier/frp/pkg/msg"
 	plugin "github.com/fatedier/frp/pkg/plugin/server"
 	"github.com/fatedier/frp/pkg/util/limit"
@@ -264,8 +265,10 @@ func (pxy *BaseProxy) handleUserTCPConnection(userConn net.Conn) {
 	name := pxy.GetName()
 	proxyType := cfg.Type
 	metrics.Server.OpenConnection(name, proxyType)
+	events.PublishConnEvent("open", name, proxyType)
 	inCount, outCount, _ := libio.Join(local, userConn)
 	metrics.Server.CloseConnection(name, proxyType)
+	events.PublishConnEvent("close", name, proxyType)
 	metrics.Server.AddTrafficIn(name, proxyType, inCount)
 	metrics.Server.AddTrafficOut(name, proxyType, outCount)
 	xl.Debugf("join connections closed")

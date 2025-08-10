@@ -83,7 +83,20 @@ func NewServer(cfg v1.WebServerConfig) (*Server, error) {
 			Certificates: []tls.Certificate{cert},
 		}
 	}
-	s.authMiddleware = netpkg.NewHTTPAuthMiddleware(cfg.User, cfg.Password).SetAuthFailDelay(200 * time.Millisecond).Middleware
+	if cfg.APIKey != "" {
+		// API key mode overrides basic auth for simplicity
+		s.authMiddleware = func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("X-API-Key") != cfg.APIKey {
+					http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
+					return
+				}
+				next.ServeHTTP(w, r)
+			})
+		}
+	} else {
+		s.authMiddleware = netpkg.NewHTTPAuthMiddleware(cfg.User, cfg.Password).SetAuthFailDelay(200 * time.Millisecond).Middleware
+	}
 	return s, nil
 }
 

@@ -54,6 +54,13 @@ func ValidateServerConfig(c *v1.ServerConfig) (Warning, error) {
 	if err := validateWebServerConfig(&c.WebServer); err != nil {
 		errs = AppendError(errs, err)
 	}
+	if err := validateWebServerConfig(&c.ProxyAPIServer); err != nil {
+		errs = AppendError(errs, err)
+	}
+	// if API key is set on proxy API server, ensure it's not trivially short
+	if c.ProxyAPIServer.APIKey != "" && len(c.ProxyAPIServer.APIKey) < 8 {
+		errs = AppendError(errs, fmt.Errorf("proxyAPIServer.apiKey too short (min 8 chars)"))
+	}
 
 	errs = AppendError(errs, ValidatePort(c.BindPort, "bindPort"))
 	errs = AppendError(errs, ValidatePort(c.KCPBindPort, "kcpBindPort"))
